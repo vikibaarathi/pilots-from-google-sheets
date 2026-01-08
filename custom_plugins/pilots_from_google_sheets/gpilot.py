@@ -23,6 +23,7 @@ class Gpilot():
         ui = self._rhapi.ui
         ui.register_panel("gpilot-import", "Pilots from Google Sheets Import", "format")
         ui.register_quickbutton("gpilot-import", "gpilot-import-button", "Import", self.import_pilot)
+        ui.register_quickbutton("gpilot-import", "gpilot-update-button", "Update Pilot Details", self.update_pilot_details)
         gpilot_form_name = UIField(name = 'gpilot-form-name', label = 'Google Sheet Name', field_type = UIFieldType.TEXT, desc = "The name of the Google Sheet. With spaces and all. Please make sure there is at least 1 col called Name and 1 called Callsign on the first sheet.")
         fields = self._rhapi.fields
         fields.register_option(gpilot_form_name, "gpilot-import")
@@ -43,6 +44,22 @@ class Gpilot():
                 print(x)
                 self._rhapi.ui.message_notify("Google Sheet Import Error - See log")
                 self.logger.warning("Google Sheet not found" + str(x))
+
+    def update_pilot_details(self, args):
+        self._rhapi.ui.message_notify("Beginning Pilot Details Update....")
+        credentials = self.get_credentials()
+        filename = self._rhapi.db.option("gpilot-form-name")
+        filenamenotempty = True if filename else False
+        if credentials is not None and filenamenotempty:
+            gc = gspread.service_account_from_dict(credentials)
+            try:
+                sh = gc.open(filename)
+                all_records = sh.sheet1.get_all_records()
+                self.update_pilots_from_sheet(all_records)
+            except Exception as x:
+                print(x)
+                self._rhapi.ui.message_notify("Google Sheet Update Error - See log")
+                self.logger.warning("Google Sheet Update Error: " + str(x))
 
     def get_credentials(self):
         here = os.path.dirname(os.path.abspath(__file__))
@@ -138,6 +155,77 @@ class Gpilot():
                     pilot_attributes["fainumber"] = pilotfainumber
                 self._rhapi.db.pilot_alter(current_id, attributes=pilot_attributes)
         self._rhapi.ui.message_notify("Import complete, please refresh.")
+        self._rhapi.ui.broadcast_pilots()
+
+    def update_pilots_from_sheet(self, all_records):
+        localpilots = self._rhapi.db.pilots
+        updated_count = 0
+        
+        # Check which custom attributes exist
+        contains_country = False
+        contains_elrs = False
+        contains_elrs_active = False
+        contains_velo_uid = False
+        
+        for i in range(len(self._rhapi.fields.pilot_attributes)):
+            if self._rhapi.fields.pilot_attributes[i].name == 'country':
+                contains_country = True
+            if self._rhapi.fields.pilot_attributes[i].name == 'comm_elrs':
+                contains_elrs = True
+            if self._rhapi.fields.pilot_attributes[i].name == 'elrs_active':
+                contains_elrs_active = True
+            if self._rhapi.fields.pilot_attributes[i].name == 'velo_uid':
+                contains_velo_uid = True
+        
+        # Loop through all pilots in database
+        for pilot in localpilots:
+            # Find matching record in Google Sheet by name
+            matching_record = None
+            for record in all_records:
+                record_name = record.get("Name", "")
+                if record_name and record_name == pilot.name:
+                    matching_record = record
+                    break
+            
+            if matching_record:
+                # Prepare update data
+                update_params = {}
+                pilot_attributes = {}
+                
+                # Update callsign if present
+                if "Callsign" in matching_record and matching_record["Callsign"]:
+                    update_params["callsign"] = matching_record["Callsign"]
+                
+                # Update phonetic if present
+                if "Phonetic" in matching_record and matching_record["Phonetic"] is not None:
+                    update_params["phonetic"] = matching_record["Phonetic"]
+                
+                # Update color if present
+                if "Colour" in matching_record and matching_record["Colour"]:
+                    update_params["color"] = matching_record["Colour"]
+                
+                # Update country attribute if present and field exists
+                if contains_country and "Country" in matching_record and matching_record["Country"] is not None:
+                    pilot_attributes["country"] = matching_record["Country"]
+                
+                # Update ELRS Bind Phrase attribute if present and field exists
+                if contains_elrs and "ELRS Bind Phrase" in matching_record and matching_record["ELRS Bind Phrase"] is not None:
+                    pilot_attributes["comm_elrs"] = matching_record["ELRS Bind Phrase"]
+                    # Also toggle elrs_active to true if the field exists
+                    if contains_elrs_active:
+                        pilot_attributes["elrs_active"] = True
+                
+                # Update Velocidrone UUID attribute if present and field exists
+                if contains_velo_uid and "Velocidrone UUID" in matching_record and matching_record["Velocidrone UUID"] is not None:
+                    pilot_attributes["velo_uid"] = matching_record["Velocidrone UUID"]
+                
+                # Perform update if there are any changes
+                if update_params or pilot_attributes:
+                    self._rhapi.db.pilot_alter(pilot.id, **update_params, attributes=pilot_attributes)
+                    updated_count += 1
+                    self.logger.info("Updated pilot " + pilot.name + " (ID: " + str(pilot.id) + ")")
+        
+        self._rhapi.ui.message_notify("Update complete. Updated " + str(updated_count) + " pilot(s).")
         self._rhapi.ui.broadcast_pilots()
 
     def check_existing_pilot(self,pilot):
